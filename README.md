@@ -18,7 +18,7 @@ FastAPI Schema Generator is a powerful tool that automatically generates complet
 - ⚡ **Full CRUD Operations** - Create, Read, Update, Delete endpoints for every table
 - ⚡ **Auto-Generated Documentation** - Swagger/OpenAPI docs out of the box
 - ⚡ **Production-Ready Architecture** - Clean separation of concerns with services, models, and routers
-- 🔍 **Advanced Querying** - Built-in pagination, sorting, and filtering
+- 🔍 **Advanced Querying** - Built-in pagination, sorting, and condition-based filtering by any column
 - ⚡ **Type-Safe** - Full type hints and Pydantic validation
 
 ##  Quick Start
@@ -149,7 +149,7 @@ Each table automatically gets these endpoints:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/v1/{table}/` | List all items (paginated) |
+| `GET` | `/api/v1/{table}/` | List all items (paginated, filterable) |
 | `GET` | `/api/v1/{table}/{id}` | Get single item |
 | `POST` | `/api/v1/{table}/` | Create new item |
 | `PUT` | `/api/v1/{table}/{id}` | Full update |
@@ -159,18 +159,58 @@ Each table automatically gets these endpoints:
 
 ### Query Parameters
 
-All list endpoints support:
+All list endpoints (`GET /api/v1/{table}/`) support:
 
 - `skip` - Number of items to skip (default: 0)
 - `limit` - Maximum items to return (default: 100, max: 1000)
 - `sort_by` - Column name to sort by
 - `order` - Sort direction: `asc` or `desc` (default: `asc`)
 
+### Filtering
+
+**Condition-based filtering** is available on all list endpoints. You can filter by any column in the table by passing the column name as a query parameter.
+
+**How it works:**
+- Pass any column name as a query parameter with its value
+- Multiple filters are combined with `AND` logic
+- Only valid column names are accepted (invalid columns are ignored)
+- Filtering works alongside pagination and sorting
+
+**Filtering Examples:**
+
+```bash
+# Filter by a single column
+curl "http://localhost:8000/api/v1/courses/?course_name=Mathematics"
+
+# Filter by multiple columns (AND logic)
+curl "http://localhost:8000/api/v1/courses/?course_name=Physics&teacher_id=2"
+
+# Filter students by email
+curl "http://localhost:8000/api/v1/students/?email=alice@example.com"
+
+# Combine filtering with pagination and sorting
+curl "http://localhost:8000/api/v1/courses/?teacher_id=1&limit=10&sort_by=course_name&order=asc"
+
+# Filter by date (if your table has date columns)
+curl "http://localhost:8000/api/v1/students/?enrollment_date=2025-01-01"
+```
+
+**Note:** Filter values are matched exactly (equality). For more complex filtering (range queries, LIKE, etc.), you can extend the generated service layer.
+
 ### Example Usage
 
 ```bash
-# Get all users with pagination
+# Get all items with pagination
 curl "http://localhost:8000/api/v1/users/?skip=0&limit=10&sort_by=created_at&order=desc"
+
+# Filter by column value
+curl "http://localhost:8000/api/v1/courses/?course_name=Mathematics"
+
+# Multiple filters combined with AND
+curl "http://localhost:8000/api/v1/students/?first_name=Alice&email=alice@example.com"
+
+# Combine filtering, pagination, and sorting
+curl "http://localhost:8000/api/v1/courses/?teacher_id=1&limit=10&sort_by=course_name&order=asc"
 
 # Get user by ID
 curl "http://localhost:8000/api/v1/users/1"
