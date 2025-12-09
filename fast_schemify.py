@@ -17,6 +17,7 @@ class FastSchemify:
         self,
         type: str = "orm",
         output: str = "generated_api",
+        enable_auth: bool = False,
         **kwargs
     ):
         """
@@ -25,6 +26,7 @@ class FastSchemify:
         Args:
             type: Database access type - 'orm' (SQLAlchemy ORM) or 'query' (raw SQL queries). Default: 'orm'
             output: Output directory for generated project. Default: 'generated_api'
+            enable_auth: Enable JWT Bearer token authentication for all endpoints. Default: False
             **kwargs: Additional configuration options (for future use)
         """
         self.type = type.lower()
@@ -36,6 +38,7 @@ class FastSchemify:
         
         self.output_dir = Path(output)
         self.use_orm = self.type == "orm"
+        self.enable_auth = enable_auth
         self.kwargs = kwargs
         
         # Will be set during generation
@@ -67,7 +70,8 @@ class FastSchemify:
         
         generator = ProjectGenerator(
             output_dir=str(self.output_dir),
-            use_orm=self.use_orm
+            use_orm=self.use_orm,
+            enable_auth=self.enable_auth
         )
         
         # Set the discovered schemas and connection
@@ -86,12 +90,13 @@ class FastSchemify:
 class ProjectGenerator:
     """Generate complete FastAPI project from database schema"""
     
-    def __init__(self, output_dir: str = "generated_api", use_orm: bool = True):
+    def __init__(self, output_dir: str = "generated_api", use_orm: bool = True, enable_auth: bool = False):
         self.output_dir = Path(output_dir)
         self.db_connection = None
         self.schema_discovery = None
         self.schemas: Dict[str, Dict[str, Any]] = {}
         self.use_orm = use_orm  # True for SQLAlchemy ORM, False for raw SQL queries
+        self.enable_auth = enable_auth  # Enable JWT authentication
     
     def generate_project(self):
         """Generate complete FastAPI project"""
@@ -113,6 +118,8 @@ class ProjectGenerator:
         # Generate project structure
         self._create_directory_structure()
         self._generate_config()
+        if self.enable_auth:
+            self._generate_auth()
         self._generate_models()
         self._generate_services()
         self._generate_routers()
@@ -120,6 +127,8 @@ class ProjectGenerator:
         self._generate_requirements()
         self._generate_readme()
         self._generate_env_example()
+        if self.enable_auth:
+            self._generate_token_script()
         self._copy_env_file()
         
         print(f"\n✅ Project generated successfully in '{self.output_dir}'")
@@ -142,6 +151,11 @@ class ProjectGenerator:
             "app/services",
             "app/db",
         ]
+        
+        # Add auth directory if authentication is enabled
+        if self.enable_auth:
+            dirs.append("app/core/auth")
+        
         for dir_path in dirs:
             (self.output_dir / dir_path).mkdir(parents=True, exist_ok=True)
         
@@ -177,6 +191,8 @@ class Settings(BaseSettings):
     api_version: str = "1.0.0"
     api_prefix: str = "/api/v1"
     
+    {jwt_settings}
+    
     class Config:
         env_file = ".env"
         case_sensitive = False
@@ -184,7 +200,70 @@ class Settings(BaseSettings):
 
 settings = Settings()
 '''
+        jwt_settings = ''
+        if self.enable_auth:
+            jwt_settings = '''# JWT Authentication settings
+    jwt_secret_key: Optional[str] = None
+    jwt_algorithm: str = "HS256"
+    jwt_access_token_expire_minutes: int = 30
+    jwt_refresh_token_expire_days: int = 7
+'''
+        config_content = config_content.format(jwt_settings=jwt_settings)
         (self.output_dir / "app" / "core" / "config.py").write_text(config_content)
+    
+    def _generate_auth(self):
+        """Generate JWT authentication dependencies"""
+        auth_content = '''"""
+JWT Authentication dependencies
+"""
+from datetime import datetime, timedelta
+from typing import Optional
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import JWTError, jwt
+from app.core.config import settings
+
+security = HTTPBearer()
+
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    """
+    Verify JWT Bearer token and return payload
+    
+    Raises HTTPException with 401 status if token is invalid or missing
+    """
+    if not settings.jwt_secret_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="JWT secret key not configured"
+        )
+    
+    token = credentials.credentials
+    
+    try:
+        payload = jwt.decode(
+            token,
+            settings.jwt_secret_key,
+            algorithms=[settings.jwt_algorithm]
+        )
+        return payload
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+def get_current_user(token_data: dict = Depends(verify_token)) -> dict:
+    """
+    Get current user from token payload
+    
+    You can customize this to extract user information from the token
+    """
+    return token_data
+'''
+        (self.output_dir / "app" / "core" / "auth" / "__init__.py").write_text(auth_content)
     
     def _generate_models(self):
         """Generate database models (ORM or raw SQL)"""
@@ -917,15 +996,24 @@ class {service_class_name}:
             service_name = f"{class_name}Service"
             schema_class_prefix = class_name
             
+            # Auth dependency import
+            auth_import = ''
+            auth_dependency = ''
+            auth_dep_for_count = ''
+            if self.enable_auth:
+                auth_import = 'from app.core.auth import get_current_user\n'
+                auth_dependency = ', current_user: dict = Depends(get_current_user)'
+                auth_dep_for_count = 'current_user: dict = Depends(get_current_user)'
+            
             router_content = f'''"""
 API router for {table_name}
 """
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi import APIRouter, HTTPException, Query, Body, Depends
 from starlette.requests import Request
 from app.services.{table_name}_service import {service_name}
 from app.schemas.{table_name} import {schema_class_prefix}Create, {schema_class_prefix}Update
-
+{auth_import}
 router = APIRouter(prefix="/{table_name}", tags=["{table_name}"])
 
 
@@ -935,7 +1023,7 @@ async def get_all(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     sort_by: Optional[str] = Query(None),
-    order: str = Query("asc", regex="^(asc|desc)$")
+    order: str = Query("asc", regex="^(asc|desc)$"){auth_dependency}
 ):
     """Get all {table_name} items with optional filtering
     
@@ -961,7 +1049,7 @@ async def get_all(
 
 
 @router.get("/{{item_id}}", response_model=dict)
-async def get_one(item_id: int):
+async def get_one(item_id: int{auth_dependency}):
     """Get a single {table_name} item by ID"""
     item = await {service_name}.get_by_id(item_id)
     if not item:
@@ -970,13 +1058,13 @@ async def get_one(item_id: int):
 
 
 @router.post("/", response_model=dict, status_code=201)
-async def create_item(item: {schema_class_prefix}Create):
+async def create_item(item: {schema_class_prefix}Create{auth_dependency}):
     """Create a new {table_name} item"""
     return await {service_name}.create(item.dict(exclude_unset=True))
 
 
 @router.put("/{{item_id}}", response_model=dict)
-async def update_item(item_id: int, item: {schema_class_prefix}Update):
+async def update_item(item_id: int, item: {schema_class_prefix}Update{auth_dependency}):
     """Update a {table_name} item"""
     result = await {service_name}.update(item_id, item.dict(exclude_unset=True))
     if not result:
@@ -985,7 +1073,7 @@ async def update_item(item_id: int, item: {schema_class_prefix}Update):
 
 
 @router.patch("/{{item_id}}", response_model=dict)
-async def patch_item(item_id: int, item: dict = Body(...)):
+async def patch_item(item_id: int, item: dict = Body(...){auth_dependency}):
     """Partially update a {table_name} item"""
     result = await {service_name}.update(item_id, item)
     if not result:
@@ -994,7 +1082,7 @@ async def patch_item(item_id: int, item: dict = Body(...)):
 
 
 @router.delete("/{{item_id}}", status_code=204)
-async def delete_item(item_id: int):
+async def delete_item(item_id: int{auth_dependency}):
     """Delete a {table_name} item"""
     success = await {service_name}.delete(item_id)
     if not success:
@@ -1003,7 +1091,7 @@ async def delete_item(item_id: int):
 
 
 @router.get("/count/total", response_model=dict)
-async def get_count():
+async def get_count({auth_dep_for_count}):
     """Get total count of {table_name} items"""
     return {{"count": await {service_name}.count()}}
 '''
@@ -1181,6 +1269,10 @@ pymysql==1.1.0
 psycopg2-binary==2.9.9
 python-multipart==0.0.6
 '''
+        if self.enable_auth:
+            requirements += '''python-jose[cryptography]==3.3.0
+python-dotenv==1.0.0
+'''
         (self.output_dir / "requirements.txt").write_text(requirements)
     
     def _generate_readme(self):
@@ -1239,7 +1331,96 @@ API_TITLE=Generated API
 API_VERSION=1.0.0
 API_PREFIX=/api/v1
 '''
+        if self.enable_auth:
+            import secrets
+            # Generate a sample secret key
+            sample_secret = secrets.token_urlsafe(32)
+            env_example += f'''
+# JWT Authentication Configuration
+JWT_SECRET_KEY={sample_secret}
+JWT_ALGORITHM=HS256
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
+JWT_REFRESH_TOKEN_EXPIRE_DAYS=7
+'''
         (self.output_dir / ".env.example").write_text(env_example)
+    
+    def _generate_token_script(self):
+        """Generate sample token generation script"""
+        token_script = '''"""
+Generate sample JWT access and refresh tokens
+
+Usage:
+    python generate_sample_token.py
+
+This script generates sample JWT tokens using the JWT_SECRET_KEY from your .env file.
+"""
+import os
+from datetime import datetime, timedelta
+from jose import jwt
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+def generate_tokens():
+    """Generate access and refresh tokens"""
+    secret_key = os.getenv("JWT_SECRET_KEY")
+    algorithm = os.getenv("JWT_ALGORITHM", "HS256")
+    access_expire_minutes = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+    refresh_expire_days = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+    
+    if not secret_key:
+        print("❌ Error: JWT_SECRET_KEY not found in .env file")
+        print("Please set JWT_SECRET_KEY in your .env file")
+        return
+    
+    # Sample payload (customize as needed)
+    payload = {
+        "sub": "sample_user_id",  # Subject (user ID)
+        "email": "user@example.com",
+        "exp": datetime.utcnow() + timedelta(minutes=access_expire_minutes),
+        "iat": datetime.utcnow(),
+        "type": "access"
+    }
+    
+    refresh_payload = {
+        "sub": "sample_user_id",
+        "email": "user@example.com",
+        "exp": datetime.utcnow() + timedelta(days=refresh_expire_days),
+        "iat": datetime.utcnow(),
+        "type": "refresh"
+    }
+    
+    # Generate tokens
+    access_token = jwt.encode(payload, secret_key, algorithm=algorithm)
+    refresh_token = jwt.encode(refresh_payload, secret_key, algorithm=algorithm)
+    
+    print("✅ Tokens generated successfully!")
+    print("")
+    print("="*60)
+    print("ACCESS TOKEN:")
+    print("="*60)
+    print(access_token)
+    print("")
+    print("="*60)
+    print("REFRESH TOKEN:")
+    print("="*60)
+    print(refresh_token)
+    print("")
+    print("="*60)
+    print("")
+    print("💡 Usage:")
+    print("   Add the access token to your requests:")
+    print("   curl -H 'Authorization: Bearer <ACCESS_TOKEN>' http://localhost:8000/api/v1/...")
+    print("")
+    print("⚠️  Note: These are sample tokens. In production, generate tokens")
+    print("   through a proper authentication endpoint after user login.")
+
+
+if __name__ == "__main__":
+    generate_tokens()
+'''
+        (self.output_dir / "generate_sample_token.py").write_text(token_script)
     
     def _copy_env_file(self):
         """Copy .env file to generated project if it exists"""

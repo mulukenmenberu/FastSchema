@@ -23,6 +23,7 @@ FastAPI Schema Generator is a powerful tool that automatically generates complet
 - ⚡ **Auto-Generated Documentation** - Swagger/OpenAPI docs out of the box
 - ⚡ **Production-Ready Architecture** - Clean separation of concerns with services, models, and routers
 - 🔍 **Advanced Querying** - Built-in pagination, sorting, and condition-based filtering by any column
+- 🔐 **JWT Authentication** - Optional Bearer token authentication for all endpoints
 - ⚡ **Type-Safe** - Full type hints and Pydantic validation
 
 ##  Quick Start
@@ -31,7 +32,7 @@ FastAPI Schema Generator is a powerful tool that automatically generates complet
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/fastapi-schema-generator.git
+git clone https://github.com/mulukenmenberu/FastSchemify.git
 cd fastapi-schema-generator
 
 # Install dependencies
@@ -65,6 +66,49 @@ python app.py
    - API: http://localhost:8000
    - Swagger UI: http://localhost:8000/docs
    - ReDoc: http://localhost:8000/redoc
+
+### Generate API with Authentication
+
+To generate an API with JWT Bearer token authentication:
+
+```python
+from fast_schemify import FastSchemify
+
+# Generate API with authentication enabled
+generate = FastSchemify(type='orm', output='generated_api', enable_auth=True)
+generate.run()
+```
+
+When `enable_auth=True`:
+- All endpoints require a Bearer token in the `Authorization` header
+- Returns `401 Unauthorized` if no valid token is provided
+- JWT secret key is stored in `.env` file as `JWT_SECRET_KEY`
+- A `generate_sample_token.py` script is created for testing
+
+**Configuration (.env file):**
+```env
+# JWT Authentication Configuration
+JWT_SECRET_KEY=your-secret-key-here
+JWT_ALGORITHM=HS256
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
+JWT_REFRESH_TOKEN_EXPIRE_DAYS=7
+```
+
+**Generate Test Tokens:**
+
+The `generate_sample_token.py` script reads the `JWT_SECRET_KEY` from your `.env` file and generates tokens:
+
+```bash
+cd generated_api
+python generate_sample_token.py
+```
+
+This will:
+- Read `JWT_SECRET_KEY` from your `.env` file
+- Generate both access and refresh tokens
+- Display tokens with usage instructions
+
+**Important:** Make sure `JWT_SECRET_KEY` is set in your `.env` file before running the token generator.
 
 ## 📖 Documentation
 
@@ -201,6 +245,52 @@ curl "http://localhost:8000/api/v1/students/?enrollment_date=2025-01-01"
 
 **Note:** Filter values are matched exactly (equality). For more complex filtering (range queries, LIKE, etc.), you can extend the generated service layer.
 
+### Authentication
+
+When `enable_auth=True` is set during generation, all endpoints require JWT Bearer token authentication.
+
+**How it works:**
+- All API endpoints require a valid Bearer token in the `Authorization` header
+- Returns `401 Unauthorized` if token is missing or invalid
+- JWT secret key must be stored in `.env` file as `JWT_SECRET_KEY`
+- Token generation script (`generate_sample_token.py`) is created for testing
+
+**Configuration:**
+
+Add to your `.env` file:
+```env
+JWT_SECRET_KEY=your-secret-key-here-min-32-chars
+JWT_ALGORITHM=HS256
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
+JWT_REFRESH_TOKEN_EXPIRE_DAYS=7
+```
+
+**Generate Test Tokens:**
+
+```bash
+cd generated_api
+python generate_sample_token.py
+```
+
+This script will:
+- Read `JWT_SECRET_KEY` from your `.env` file
+- Generate both access and refresh tokens
+- Display tokens with usage instructions
+
+**Using Tokens:**
+
+```bash
+# Make authenticated requests
+curl -H "Authorization: Bearer <ACCESS_TOKEN>" \\
+  "http://localhost:8000/api/v1/courses/"
+
+# Example with token
+curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \\
+  "http://localhost:8000/api/v1/students/?first_name=Alice"
+```
+
+**Note:** The `generate_sample_token.py` script creates sample tokens for testing. In production, implement a proper login endpoint that generates tokens after user authentication.
+
 ### Example Usage
 
 ```bash
@@ -292,7 +382,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📧 Support
 
-For issues, questions, or contributions, please open an issue on [GitHub](https://github.com/yourusername/fastapi-schema-generator/issues).
+For issues, questions, or contributions, please open an issue on [GitHub](https://github.com/mulukenmenberu/FastSchemify/issues).
 
 ---
 

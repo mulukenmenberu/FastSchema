@@ -4,10 +4,14 @@ Example usage of FastSchemify
 from fast_schemify import FastSchemify
 
 # Example 1: Using ORM mode (default)
-generate = FastSchemify(type='orm', output='generated_api')
+generate = FastSchemify(type='orm', output='generated_api', enable_auth=True)
 generate.run()
 
-# # Example 2: Using raw SQL queries mode
+# # Example 2: Using ORM mode with authentication enabled
+# generate = FastSchemify(type='orm', output='generated_api', enable_auth=True)
+# generate.run()
+
+# # Example 3: Using raw SQL queries mode
 # generate = FastSchemify(type='query', output='generated_api_query')
 # generate.run()
 
