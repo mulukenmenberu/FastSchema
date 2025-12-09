@@ -5,7 +5,7 @@ from fast_schemify import FastSchemify
 
 # Example 1: Using ORM mode (default)
 generate = FastSchemify(type='orm', output='generated_api', enable_auth=True,
-                        login_schema={"users":['username', "password"]})
+                        login_schema={"users":['username', "email"]})
 generate.run()
 
 # # Example 2: Using ORM mode with authentication enabled

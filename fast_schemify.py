@@ -18,6 +18,7 @@ class FastSchemify:
         type: str = "orm",
         output: str = "generated_api",
         enable_auth: bool = False,
+        login_schema: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
         """
@@ -27,6 +28,8 @@ class FastSchemify:
             type: Database access type - 'orm' (SQLAlchemy ORM) or 'query' (raw SQL queries). Default: 'orm'
             output: Output directory for generated project. Default: 'generated_api'
             enable_auth: Enable JWT Bearer token authentication for all endpoints. Default: False
+            login_schema: Dict with table name as key and list of column names as value for login endpoint.
+                         Example: {"users": ["username", "password"]}. Default: None
             **kwargs: Additional configuration options (for future use)
         """
         self.type = type.lower()
@@ -39,6 +42,7 @@ class FastSchemify:
         self.output_dir = Path(output)
         self.use_orm = self.type == "orm"
         self.enable_auth = enable_auth
+        self.login_schema = login_schema
         self.kwargs = kwargs
         
         # Will be set during generation
@@ -71,7 +75,8 @@ class FastSchemify:
         generator = ProjectGenerator(
             output_dir=str(self.output_dir),
             use_orm=self.use_orm,
-            enable_auth=self.enable_auth
+            enable_auth=self.enable_auth,
+            login_schema=self.login_schema
         )
         
         # Set the discovered schemas and connection
@@ -90,13 +95,14 @@ class FastSchemify:
 class ProjectGenerator:
     """Generate complete FastAPI project from database schema"""
     
-    def __init__(self, output_dir: str = "generated_api", use_orm: bool = True, enable_auth: bool = False):
+    def __init__(self, output_dir: str = "generated_api", use_orm: bool = True, enable_auth: bool = False, login_schema: Optional[Dict[str, Any]] = None):
         self.output_dir = Path(output_dir)
         self.db_connection = None
         self.schema_discovery = None
         self.schemas: Dict[str, Dict[str, Any]] = {}
         self.use_orm = use_orm  # True for SQLAlchemy ORM, False for raw SQL queries
         self.enable_auth = enable_auth  # Enable JWT authentication
+        self.login_schema = login_schema  # Login schema: {"table_name": ["column1", "column2", ...]}
     
     def generate_project(self):
         """Generate complete FastAPI project"""
@@ -123,6 +129,8 @@ class ProjectGenerator:
         self._generate_models()
         self._generate_services()
         self._generate_routers()
+        if self.login_schema and self.enable_auth:
+            self._generate_login_endpoint()
         self._generate_main_app()
         self._generate_requirements()
         self._generate_readme()
@@ -263,8 +271,365 @@ def get_current_user(token_data: dict = Depends(verify_token)) -> dict:
     You can customize this to extract user information from the token
     """
     return token_data
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """Create JWT access token"""
+    if not settings.jwt_secret_key:
+        raise ValueError("JWT_SECRET_KEY not configured")
+    
+    algorithm = settings.jwt_algorithm or "HS256"
+    to_encode = data.copy()
+    
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=settings.jwt_access_token_expire_minutes or 30)
+    
+    to_encode.update({"exp": expire, "iat": datetime.utcnow(), "type": "access"})
+    encoded_jwt = jwt.encode(to_encode, settings.jwt_secret_key, algorithm=algorithm)
+    return encoded_jwt
+
+
+def create_refresh_token(data: dict) -> str:
+    """Create JWT refresh token"""
+    if not settings.jwt_secret_key:
+        raise ValueError("JWT_SECRET_KEY not configured")
+    
+    algorithm = settings.jwt_algorithm or "HS256"
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(days=settings.jwt_refresh_token_expire_days or 7)
+    
+    to_encode.update({"exp": expire, "iat": datetime.utcnow(), "type": "refresh"})
+    encoded_jwt = jwt.encode(to_encode, settings.jwt_secret_key, algorithm=algorithm)
+    return encoded_jwt
 '''
         (self.output_dir / "app" / "core" / "auth" / "__init__.py").write_text(auth_content)
+    
+    def _generate_login_endpoint(self):
+        """Generate login endpoint based on login_schema"""
+        if not self.login_schema:
+            return
+        
+        # Get table name and columns from login_schema
+        table_name = list(self.login_schema.keys())[0]
+        login_columns = self.login_schema[table_name]
+        
+        if table_name not in self.schemas:
+            print(f"⚠️  Warning: Table '{table_name}' not found in database. Skipping login endpoint generation.")
+            return
+        
+        # Get table schema
+        table_schema = self.schemas[table_name]
+        primary_key = self.schema_discovery.get_primary_key(table_name) or "id"
+        
+        # Build login request schema fields
+        login_fields = []
+        for col in login_columns:
+            if col in table_schema["columns"]:
+                col_type = self._get_pydantic_type(table_schema["columns"][col]["type"])
+                login_fields.append(f'    {col}: {col_type}')
+        
+        if not login_fields:
+            print(f"⚠️  Warning: No valid login columns found. Skipping login endpoint generation.")
+            return
+        
+        # Check if MongoDB (from database connection type)
+        from database.connections import MongoDBConnection
+        is_mongodb = isinstance(self.db_connection, MongoDBConnection)
+        
+        # Determine if using ORM, SQL, or MongoDB
+        if is_mongodb:
+            # MongoDB mode
+            login_endpoint = f'''"""
+Login endpoint for {table_name}
+"""
+from typing import Dict, Any
+from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel
+from datetime import timedelta
+from app.core.config import settings
+from app.core.auth import create_access_token, create_refresh_token
+from pymongo import MongoClient
+
+router = APIRouter(prefix="/auth", tags=["authentication"])
+
+
+class LoginRequest(BaseModel):
+    """Login request schema"""
+{chr(10).join(login_fields)}
+
+    class Config:
+        from_attributes = True
+
+
+@router.post("/login", response_model=Dict[str, Any])
+async def login(credentials: LoginRequest):
+    """
+    Login endpoint - validates credentials and returns JWT tokens
+    
+    This endpoint does NOT require authentication.
+    """
+    if not settings.jwt_secret_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="JWT_SECRET_KEY not configured in .env file"
+        )
+    
+    # Connect to MongoDB
+    if settings.db_uri:
+        client = MongoClient(settings.db_uri)
+    else:
+        if settings.db_user and settings.db_password:
+            host = settings.db_host or "localhost"
+            port = settings.db_port or 27017
+            connection_string = f"mongodb://{{settings.db_user}}:{{settings.db_password}}@{{host}}:{{port}}/{{settings.db_name}}"
+        else:
+            host = settings.db_host or "localhost"
+            port = settings.db_port or 27017
+            connection_string = f"mongodb://{{host}}:{{port}}/{{settings.db_name}}"
+        client = MongoClient(connection_string)
+    
+    try:
+        db = client[settings.db_name]
+        collection = db["{table_name}"]
+        
+        # Build query from login credentials
+        query = {{}}
+        for col in {login_columns}:
+            if hasattr(credentials, col):
+                value = getattr(credentials, col)
+                query[col] = value
+        
+        if not query:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No valid credentials provided"
+            )
+        
+        # Find user in MongoDB collection
+        user = collection.find_one(query)
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials"
+            )
+        
+        # Convert MongoDB document to dict
+        user_dict = dict(user)
+        # Convert ObjectId to string
+        if "_id" in user_dict:
+            user_dict["_id"] = str(user_dict["_id"])
+        
+        # Create tokens
+        token_data = {{
+            "sub": str(user_dict.get("{primary_key}", user_dict.get("_id", ""))),
+            "email": user_dict.get("email"),
+        }}
+        # Add any additional user data to token
+        for key, value in user_dict.items():
+            if key not in token_data and value is not None:
+                token_data[key] = str(value) if not isinstance(value, (str, int, float, bool)) else value
+        
+        access_token = create_access_token(token_data)
+        refresh_token = create_refresh_token(token_data)
+        
+        return {{
+            "message": "Login successful",
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "user": user_dict
+        }}
+    finally:
+        client.close()
+'''
+        elif self.use_orm:
+            model_class_name = self._to_class_name(table_name)
+            login_endpoint = f'''"""
+Login endpoint for {table_name}
+"""
+from typing import Dict, Any
+from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel
+from datetime import timedelta
+from app.core.config import settings
+from app.core.auth import create_access_token, create_refresh_token
+from app.models.{table_name} import {model_class_name}
+from app.models.database import get_session
+from sqlalchemy.orm import Session
+
+router = APIRouter(prefix="/auth", tags=["authentication"])
+
+
+class LoginRequest(BaseModel):
+    """Login request schema"""
+{chr(10).join(login_fields)}
+
+    class Config:
+        from_attributes = True
+
+
+@router.post("/login", response_model=Dict[str, Any])
+async def login(credentials: LoginRequest):
+    """
+    Login endpoint - validates credentials and returns JWT tokens
+    
+    This endpoint does NOT require authentication.
+    """
+    if not settings.jwt_secret_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="JWT_SECRET_KEY not configured in .env file"
+        )
+    
+    db: Session = get_session()
+    try:
+        # Build query filters from login credentials
+        query = db.query({model_class_name})
+        for col in {login_columns}:
+            if hasattr(credentials, col):
+                value = getattr(credentials, col)
+                query = query.filter(getattr({model_class_name}, col) == value)
+        
+        user = query.first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials"
+            )
+        
+        # Convert user to dict
+        user_dict = {{k: v for k, v in user.__dict__.items() if not k.startswith('_')}}
+        
+        # Create tokens
+        token_data = {{
+            "sub": str(user_dict.get("{primary_key}")),
+            "email": user_dict.get("email"),
+        }}
+        # Add any additional user data to token
+        for key, value in user_dict.items():
+            if key not in token_data and value is not None:
+                token_data[key] = str(value) if not isinstance(value, (str, int, float, bool)) else value
+        
+        access_token = create_access_token(token_data)
+        refresh_token = create_refresh_token(token_data)
+        
+        return {{
+            "message": "Login successful",
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "user": user_dict
+        }}
+    finally:
+        db.close()
+'''
+        else:
+            # SQL mode
+            columns = list(table_schema["columns"].keys())
+            columns_str = ", ".join(columns)
+            login_endpoint = f'''"""
+Login endpoint for {table_name}
+"""
+from typing import Dict, Any
+from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel
+from datetime import timedelta
+from app.core.config import settings
+from app.core.auth import create_access_token, create_refresh_token
+from app.models.database import get_connection
+
+router = APIRouter(prefix="/auth", tags=["authentication"])
+
+
+class LoginRequest(BaseModel):
+    """Login request schema"""
+{chr(10).join(login_fields)}
+
+    class Config:
+        from_attributes = True
+
+
+@router.post("/login", response_model=Dict[str, Any])
+async def login(credentials: LoginRequest):
+    """
+    Login endpoint - validates credentials and returns JWT tokens
+    
+    This endpoint does NOT require authentication.
+    """
+    if not settings.jwt_secret_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="JWT_SECRET_KEY not configured in .env file"
+        )
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Build WHERE clause from login credentials
+        where_clauses = []
+        params = []
+        placeholder = "?" if settings.db_type == "sqlite" else "%s"
+        
+        for col in {login_columns}:
+            if hasattr(credentials, col):
+                value = getattr(credentials, col)
+                where_clauses.append(col + " = " + placeholder)
+                params.append(value)
+        
+        if not where_clauses:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No valid credentials provided"
+            )
+        
+        query = "SELECT {columns_str} FROM {table_name} WHERE " + " AND ".join(where_clauses)
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials"
+            )
+        
+        # Convert row to dict
+        if hasattr(cursor, "description") and cursor.description:
+            column_names = [desc[0] for desc in cursor.description]
+            user_dict = dict(zip(column_names, row))
+        else:
+            user_dict = dict(row)
+        
+        # Create tokens
+        token_data = {{
+            "sub": str(user_dict.get("{primary_key}")),
+            "email": user_dict.get("email"),
+        }}
+        # Add any additional user data to token
+        for key, value in user_dict.items():
+            if key not in token_data and value is not None:
+                token_data[key] = str(value) if not isinstance(value, (str, int, float, bool)) else value
+        
+        access_token = create_access_token(token_data)
+        refresh_token = create_refresh_token(token_data)
+        
+        return {{
+            "message": "Login successful",
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "user": user_dict
+        }}
+    finally:
+        cursor.close()
+'''
+        
+        # Write login endpoint file
+        (self.output_dir / "app" / "api" / "v1" / "endpoints" / "auth.py").write_text(login_endpoint)
     
     def _generate_models(self):
         """Generate database models (ORM or raw SQL)"""
@@ -983,12 +1348,21 @@ class {service_class_name}:
     
     def _generate_routers(self):
         """Generate FastAPI routers and Pydantic schemas"""
+        # Get login table name if login_schema is provided
+        login_table = None
+        if self.login_schema:
+            login_table = list(self.login_schema.keys())[0]
+        
         # First, generate Pydantic schemas for each table
         for table_name, schema in self.schemas.items():
             self._generate_pydantic_schemas(table_name, schema)
         
         # Then generate routers that import the schemas
+        # Exclude login table from regular CRUD endpoints
         for table_name, schema in self.schemas.items():
+            # Skip generating regular CRUD endpoints for login table
+            if table_name == login_table:
+                continue
             primary_key = self.schema_discovery.get_primary_key(table_name)
             if not primary_key:
                 primary_key = "id"
@@ -1099,17 +1473,35 @@ async def get_count({auth_dep_for_count}):
             (self.output_dir / "app" / "api" / "v1" / "endpoints" / f"{table_name}.py").write_text(router_content)
         
         # Generate router index
+        # Get login table name if login_schema is provided
+        login_table = None
+        if self.login_schema:
+            login_table = list(self.login_schema.keys())[0]
+        
         router_index = '''"""
 API router index
 """
 from fastapi import APIRouter
 '''
+        # Add auth router if login_schema is provided
+        if self.login_schema and self.enable_auth:
+            router_index += 'from app.api.v1.endpoints import auth as auth_router\n'
+        
+        # Exclude login table from regular router imports
         for table_name in self.schemas.keys():
-            router_index += f'from app.api.v1.endpoints import {table_name} as {table_name}_router\n'
+            if table_name != login_table:
+                router_index += f'from app.api.v1.endpoints import {table_name} as {table_name}_router\n'
         
         router_index += '\napi_router = APIRouter()\n'
+        
+        # Include auth router first (before other routers)
+        if self.login_schema and self.enable_auth:
+            router_index += 'api_router.include_router(auth_router.router)\n'
+        
+        # Exclude login table from regular router includes
         for table_name in self.schemas.keys():
-            router_index += f'api_router.include_router({table_name}_router.router)\n'
+            if table_name != login_table:
+                router_index += f'api_router.include_router({table_name}_router.router)\n'
         
         (self.output_dir / "app" / "api" / "v1" / "__init__.py").write_text(router_index)
     
