@@ -202,11 +202,11 @@ settings = Settings()
 '''
         jwt_settings = ''
         if self.enable_auth:
-            jwt_settings = '''# JWT Authentication settings
+            jwt_settings = '''# JWT Authentication settings (read from .env only, no defaults)
     jwt_secret_key: Optional[str] = None
-    jwt_algorithm: str = "HS256"
-    jwt_access_token_expire_minutes: int = 30
-    jwt_refresh_token_expire_days: int = 7
+    jwt_algorithm: Optional[str] = None
+    jwt_access_token_expire_minutes: Optional[int] = None
+    jwt_refresh_token_expire_days: Optional[int] = None
 '''
         config_content = config_content.format(jwt_settings=jwt_settings)
         (self.output_dir / "app" / "core" / "config.py").write_text(config_content)
@@ -235,16 +235,17 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) 
     if not settings.jwt_secret_key:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="JWT secret key not configured"
+            detail="JWT_SECRET_KEY not configured in .env file"
         )
     
+    algorithm = settings.jwt_algorithm or "HS256"
     token = credentials.credentials
     
     try:
         payload = jwt.decode(
             token,
             settings.jwt_secret_key,
-            algorithms=[settings.jwt_algorithm]
+            algorithms=[algorithm]
         )
         return payload
     except JWTError:
@@ -1332,15 +1333,12 @@ API_VERSION=1.0.0
 API_PREFIX=/api/v1
 '''
         if self.enable_auth:
-            import secrets
-            # Generate a sample secret key
-            sample_secret = secrets.token_urlsafe(32)
-            env_example += f'''
-# JWT Authentication Configuration
-JWT_SECRET_KEY={sample_secret}
-JWT_ALGORITHM=HS256
-JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
-JWT_REFRESH_TOKEN_EXPIRE_DAYS=7
+            env_example += '''
+# JWT Authentication Configuration (add these to your .env file)
+# JWT_SECRET_KEY=your-secret-key-here
+# JWT_ALGORITHM=HS256
+# JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
+# JWT_REFRESH_TOKEN_EXPIRE_DAYS=7
 '''
         (self.output_dir / ".env.example").write_text(env_example)
     
@@ -1365,9 +1363,9 @@ load_dotenv()
 def generate_tokens():
     """Generate access and refresh tokens"""
     secret_key = os.getenv("JWT_SECRET_KEY")
-    algorithm = os.getenv("JWT_ALGORITHM", "HS256")
-    access_expire_minutes = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
-    refresh_expire_days = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+    algorithm = os.getenv("JWT_ALGORITHM") or "HS256"
+    access_expire_minutes = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES") or "30")
+    refresh_expire_days = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS") or "7")
     
     if not secret_key:
         print("❌ Error: JWT_SECRET_KEY not found in .env file")
@@ -1460,6 +1458,8 @@ API_TITLE=Generated API
 API_VERSION=1.0.0
 API_PREFIX=/api/v1
 '''
+            # JWT settings will be copied from original .env if they exist
+            # Don't generate them here - user must provide them in .env
             (self.output_dir / ".env").write_text(env_content)
             print("✓ Created .env file in generated project")
     
