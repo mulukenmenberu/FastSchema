@@ -564,6 +564,9 @@ def init_tables():
             model_class_name = self._to_class_name(table_name)
             service_class_name = f"{model_class_name}Service"
             
+            # Get column names for filter validation
+            columns_list_str = str(list(schema["columns"].keys()))
+            
             service_content = f'''"""
 Service layer for {table_name}
 """
@@ -577,11 +580,24 @@ class {service_class_name}:
     """Service for {table_name} operations"""
     
     @staticmethod
-    async def get_all(skip: int = 0, limit: int = 100, sort_by: Optional[str] = None, order: str = "asc") -> List[Dict[str, Any]]:
-        """Get all items"""
+    async def get_all(
+        skip: int = 0, 
+        limit: int = 100, 
+        sort_by: Optional[str] = None, 
+        order: str = "asc",
+        filters: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """Get all items with optional filtering"""
         db: Session = get_session()
         try:
             query = db.query({model_class_name})
+            
+            # Apply filters
+            if filters:
+                valid_columns = {columns_list_str}
+                for column, value in filters.items():
+                    if column in valid_columns:
+                        query = query.filter(getattr({model_class_name}, column) == value)
             
             if sort_by:
                 if order == "desc":
@@ -897,14 +913,16 @@ class {service_class_name}:
             if not primary_key:
                 primary_key = "id"
             
-            service_name = f"{table_name.capitalize().replace('_', '')}Service"
-            schema_class_prefix = table_name.capitalize().replace("_", "")
+            class_name = self._to_class_name(table_name)
+            service_name = f"{class_name}Service"
+            schema_class_prefix = class_name
             
             router_content = f'''"""
 API router for {table_name}
 """
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Query, Body
+from starlette.requests import Request
 from app.services.{table_name}_service import {service_name}
 from app.schemas.{table_name} import {schema_class_prefix}Create, {schema_class_prefix}Update
 
@@ -913,13 +931,33 @@ router = APIRouter(prefix="/{table_name}", tags=["{table_name}"])
 
 @router.get("/", response_model=List[dict])
 async def get_all(
+    request: Request,
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     sort_by: Optional[str] = Query(None),
     order: str = Query("asc", regex="^(asc|desc)$")
 ):
-    """Get all {table_name} items"""
-    return await {service_name}.get_all(skip=skip, limit=limit, sort_by=sort_by, order=order)
+    """Get all {table_name} items with optional filtering
+    
+    Filter by any column using query parameters. Example:
+    /api/v1/{table_name}/?first_name=Alice&email=alice@example.com
+    """
+    # Extract filter parameters from query string
+    # Exclude pagination and sorting parameters
+    excluded_params = {{"skip", "limit", "sort_by", "order"}}
+    filters = {{
+        key: value 
+        for key, value in request.query_params.items() 
+        if key not in excluded_params and value is not None
+    }}
+    
+    return await {service_name}.get_all(
+        skip=skip, 
+        limit=limit, 
+        sort_by=sort_by, 
+        order=order,
+        filters=filters if filters else None
+    )
 
 
 @router.get("/{{item_id}}", response_model=dict)
@@ -1005,7 +1043,7 @@ from fastapi import APIRouter
             
             update_fields.append(f'    {col_name}: Optional[{col_type}] = None')
         
-        schema_class_prefix = table_name.capitalize().replace("_", "")
+        schema_class_prefix = self._to_class_name(table_name)
         
         schema_content = f'''"""
 Pydantic schemas for {table_name}
