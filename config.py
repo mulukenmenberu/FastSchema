@@ -25,9 +25,16 @@ class Settings(BaseSettings):
     api_version: str = "1.0.0"
     api_prefix: str = "/api"
     
+    # JWT Authentication settings (optional - only used when enable_auth=True)
+    jwt_secret_key: Optional[str] = None
+    jwt_algorithm: str = "HS256"
+    jwt_access_token_expire_minutes: int = 30
+    jwt_refresh_token_expire_days: int = 7
+    
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"  # Ignore extra fields in .env that aren't defined here
 
 
 settings = Settings()
